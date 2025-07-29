@@ -113,37 +113,6 @@ fastify.post("/outbound-call", async (request, reply) => {
   }
 });
 
-
-// TwiML route for outbound calls
-// fastify.all("/outbound-call-twiml", async (request, reply) => {
-
-//   const answeredBy = req.body?.AnsweredBy || "unknown";
-//   console.log("🔍 Answered by:", answeredBy);
-//   if (answeredBy === 'human') {
-//     const prompt = request.query.prompt || "";
-//     const first_message = request.query.first_message || "";
-
-//     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
-//         <Response>
-//           <Connect>
-//             <Stream url="wss://${request.headers.host}/outbound-media-stream">
-//               <Parameter name="prompt" value="${prompt}" />
-//               <Parameter name="first_message" value="${first_message}" />
-//             </Stream>
-//           </Connect>
-//         </Response>`;
-
-//     reply.type("text/xml").send(twimlResponse);
-//   } else if (answeredBy === 'machine_start') {
-//     const response = new VoiceResponse();
-
-//     response.say("Hi there! This is Olivier from AdraptrrixAI. Am I speaking with someone from Ikigai Barbers? Is it a good time to talk to you?")
-//   }
-
-
-// });
-
-
 fastify.all("/outbound-call-twiml", async (request, reply) => {
   try {
     const answeredBy = request.body?.AnsweredBy || "unknown";
@@ -188,7 +157,6 @@ fastify.all("/outbound-call-twiml", async (request, reply) => {
   }
 });
 
-
 // WebSocket route for handling media streams
 fastify.register(async fastifyInstance => {
   fastifyInstance.get(
@@ -215,7 +183,7 @@ fastify.register(async fastifyInstance => {
           elevenLabsWs.on("open", () => {
             console.log("[ElevenLabs] Connected to Conversational AI");
 
-            // Send initia{l configuration with prompt and first message
+            // Send initial configuration with prompt and first message
             const initialConfig = {
               type: "conversation_initiation_client_data",
               conversation_config_override: {
@@ -303,7 +271,6 @@ fastify.register(async fastifyInstance => {
                 case "agent_response":
                   console.log(
                     `[Twilio] Agent response: ${message.agent_response_event?.agent_response}`
-
                   );
                   break;
 
@@ -313,11 +280,10 @@ fastify.register(async fastifyInstance => {
                   );
                   const transcript = message.user_transcription_event?.user_transcript?.toLowerCase() || "";
                   const parsedDate = chrono.parseDate(transcript);
-                  if (parsedDate) userInput.date = parsedDate
-                  if (transcript.includes("15 minutes")) userInput.duration = 15
-                  else if (transcript.includes("30 minutes")) userInput.duration = 30
-                  else if (transcript.includes("60 minutes") || transcript.includes("60 minutes")) userInput.duration = 60
-
+                  if (parsedDate) userInput.date = parsedDate;
+                  if (transcript.includes("15 minutes")) userInput.duration = 15;
+                  else if (transcript.includes("30 minutes")) userInput.duration = 30;
+                  else if (transcript.includes("60 minutes") || transcript.includes("60 minutes")) userInput.duration = 60;
 
                   const emailMatch = transcript.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z]{2,}\b/i);
                   if (emailMatch) userInput.email = emailMatch[0];
@@ -345,7 +311,6 @@ fastify.register(async fastifyInstance => {
                     }
                   }
 
-
                   break;
 
                 default:
@@ -363,79 +328,87 @@ fastify.register(async fastifyInstance => {
           });
 
           elevenLabsWs.on("close", () => {
-            console.log("[ElevenLabs] Disconnected");
+            console.log("[ElevenLabs] Connection closed");
           });
         } catch (error) {
-          console.error("[ElevenLabs] Setup error:", error);
+          console.error("[ElevenLabs] Failed to setup WebSocket:", error);
         }
       };
 
-      // Set up ElevenLabs connection
-      setupElevenLabs();
-
-      // Handle messages from Twilio
-      ws.on("message", message => {
+      ws.on("message", async data => {
         try {
-          const msg = JSON.parse(message);
-          if (msg.event !== "media") {
-            console.log(`[Twilio] Received event: ${msg.event}`);
-          }
+          const msg = JSON.parse(data);
 
           switch (msg.event) {
             case "start":
-              streamSid = msg.start.streamSid;
-              callSid = msg.start.callSid;
-              customParameters = msg.start.customParameters; // Store parameters
-              console.log(
-                `[Twilio] Stream started - StreamSid: ${streamSid}, CallSid: ${callSid}`
-              );
-              console.log("[Twilio] Start parameters:", customParameters);
+              streamSid = msg.streamSid;
+              callSid = msg.callSid;
+              customParameters = {};
+
+              // Extract parameters sent from Twilio's Stream element
+              if (msg.parameters && msg.parameters.length) {
+                msg.parameters.forEach(param => {
+                  if (param.name && param.value) {
+                    customParameters[param.name] = param.value;
+                  }
+                });
+              }
+
+              console.log("[Server] Stream started with parameters:", customParameters);
+
+              // Setup ElevenLabs connection now that we have parameters
+              await setupElevenLabs();
+
               break;
 
             case "media":
-              if (elevenLabsWs?.readyState === WebSocket.OPEN) {
-                const audioMessage = {
-                  user_audio_chunk: Buffer.from(
-                    msg.media.payload,
-                    "base64"
-                  ).toString("base64"),
+              // Forward media to ElevenLabs as base64
+              if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+                const mediaPayload = msg.media?.payload || "";
+                const mediaMsg = {
+                  type: "media",
+                  audio: {
+                    chunk: mediaPayload,
+                  },
                 };
-                elevenLabsWs.send(JSON.stringify(audioMessage));
+                elevenLabsWs.send(JSON.stringify(mediaMsg));
               }
               break;
 
             case "stop":
-              console.log(`[Twilio] Stream ${streamSid} ended`);
-              if (elevenLabsWs?.readyState === WebSocket.OPEN) {
+              streamSid = null;
+              callSid = null;
+              if (elevenLabsWs) {
                 elevenLabsWs.close();
+                elevenLabsWs = null;
               }
+              console.log("[Server] Stream stopped");
               break;
 
             default:
-              console.log(`[Twilio] Unhandled event: ${msg.event}`);
+              console.log("[Server] Unhandled event:", msg.event);
           }
         } catch (error) {
-          console.error("[Twilio] Error processing message:", error);
+          console.error("[Server] Error processing message:", error);
         }
       });
 
-      // Handle WebSocket closure
       ws.on("close", () => {
-        console.log("[Twilio] Client disconnected");
-        if (elevenLabsWs?.readyState === WebSocket.OPEN) {
+        console.log("[Server] Twilio media stream disconnected");
+        if (elevenLabsWs) {
           elevenLabsWs.close();
+          elevenLabsWs = null;
         }
       });
     }
   );
 });
 
-// Start the Fastify server
-fastify.listen({ port: PORT }, err => {
+// Start the Fastify server on 0.0.0.0 so it's accessible externally
+fastify.listen({ port: PORT, host: '0.0.0.0' }, err => {
   if (err) {
     console.error("Error starting server:", err);
     process.exit(1);
   }
   console.log(`[Server] Listening on port ${PORT}`);
 });
-
